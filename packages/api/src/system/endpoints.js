@@ -9,12 +9,19 @@ const https = require("https");
  * @param {number} timeout - Timeout in ms
  * @returns {Promise<object>}
  */
+// Endpoint probes verify peer certificates by default. Set STRICT_TLS=false to
+// opt into permissive mode for internal/self-signed monitoring targets.
+// Default flipped from off→on on 2026-05-29 per board review on PR #48
+// (Piccolo + Trunks + Bulma blocker: don't preserve known-bad posture in a
+// security PR).
+const STRICT_TLS = process.env.STRICT_TLS !== "false";
+
 function probeEndpoint(name, url, expectedStatus = 200, timeout = 15000) {
   return new Promise((resolve) => {
     const startTime = Date.now();
     const client = url.startsWith("https") ? https : http;
 
-    const req = client.get(url, { timeout, rejectUnauthorized: false }, (res) => {
+    const req = client.get(url, { timeout, rejectUnauthorized: STRICT_TLS }, (res) => {
       // Consume response body
       res.resume();
       res.on("end", () => {
