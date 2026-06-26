@@ -5,6 +5,50 @@ function shouldSample({ now, lastSampleMs, clientCount }) {
   return now - lastSampleMs >= minGap - 500; // 500ms tolerance for timer drift
 }
 
+// ── Always-on adaptive sampler (decoupled from SSE broadcast) ──
+let _lastSampleMs = 0;
+let _latest = null; // { metrics, containerStats }
+let _recordMetrics = null; // set lazily; DI seam for tests
+
+function cacheLatest(metrics, containerStats) {
+  _latest = { metrics, containerStats };
+}
+function getLatest() {
+  return _latest;
+}
+
+async function sampleTick() {
+  // Require lazily so mocks applied before require() take effect in tests
+  const { getSystemMetrics } = require("./system/metrics");
+  const containers = require("./docker/containers");
+  const { getClientCount } = require("./stream/sse");
+  const metricsHistory = require("./system/history");
+  const recorder = _recordMetrics !== null ? _recordMetrics : metricsHistory.recordMetrics;
+  try {
+    const now = Date.now();
+    if (!shouldSample({ now, lastSampleMs: _lastSampleMs, clientCount: getClientCount() })) return;
+    const metrics = getSystemMetrics();
+    const allContainers = await containers.listContainers(true);
+    const running = allContainers.filter((c) => c.state === "running").length;
+    const containerStats = { total: allContainers.length, running, stopped: allContainers.length - running };
+    recorder(metrics, containerStats);
+    cacheLatest(metrics, containerStats);
+    _lastSampleMs = now;
+  } catch (err) {
+    console.error("[SAMPLER] sampleTick error:", err.message);
+  }
+}
+
+// Test-only DI hooks
+function _resetSamplerState() {
+  _lastSampleMs = 0;
+  _latest = null;
+  _recordMetrics = null;
+}
+function _setRecorder(fn) {
+  _recordMetrics = fn;
+}
+
 function bootstrap() {
   require("dotenv").config();
   const express = require("express");
@@ -161,14 +205,12 @@ function bootstrap() {
     try {
       if (getClientCount() === 0) return;
 
-      const [allContainers, metrics] = await Promise.all([
-        containers.listContainers(true),
-        Promise.resolve(getSystemMetrics()),
-      ]);
+      const allContainers = await containers.listContainers(true);
+      const cached = getLatest();
+      const metrics = cached ? cached.metrics : getSystemMetrics();
 
       const running = allContainers.filter((c) => c.state === "running").length;
       const containerStats = { total: allContainers.length, running, stopped: allContainers.length - running };
-      metricsHistory.recordMetrics(metrics, containerStats);
       if (!app.locals.maintenanceMode) alertEngine.evaluateRules(metrics, containerStats);
       broadcast("metrics", metrics);
       broadcast(
@@ -216,6 +258,9 @@ function bootstrap() {
 
   const broadcastInterval = setInterval(broadcastLoop, 15000);
 
+  // Always-on sampler — persists metrics regardless of SSE clients
+  const samplerInterval = setInterval(sampleTick, SAMPLE_INTERVAL_MS);
+
   // Periodic WAL checkpoint every 5 minutes (prevents WAL file from growing unbounded)
   const walCheckpointInterval = setInterval(
     () => {
@@ -252,6 +297,7 @@ function bootstrap() {
   function shutdown(signal) {
     console.log(`[COCKPIT] ${signal} received — shutting down gracefully`);
     clearInterval(broadcastInterval);
+    clearInterval(samplerInterval);
     clearInterval(walCheckpointInterval);
     clearInterval(auditPruneInterval);
     stopJwtCleanup();
@@ -280,4 +326,11 @@ if (require.main === module) {
   bootstrap();
 }
 
-module.exports = { shouldSample };
+module.exports = {
+  shouldSample,
+  sampleTick,
+  cacheLatest,
+  getLatest,
+  _resetSamplerState,
+  _setRecorder,
+};

@@ -87,3 +87,80 @@ describe("adaptive sampler cadence decision (shouldSample)", () => {
     expect(shouldSample({ now: 1_000_000, lastSampleMs: 0, clientCount: 0 })).toBe(true);
   });
 });
+
+describe("sampleTick records regardless of SSE client count", () => {
+  let indexMod, metricsHistoryMod, sseMod, metricsMod, containersMod;
+  let db, dir;
+
+  beforeEach(() => {
+    jest.resetModules();
+    // Mock the data sources before requiring index.
+    jest.doMock("../src/stream/sse", () => ({
+      broadcast: jest.fn(),
+      getClientCount: jest.fn(() => 0), // ZERO clients
+      closeAllClients: jest.fn(),
+    }));
+    jest.doMock("../src/system/metrics", () => ({
+      getSystemMetrics: jest.fn(() => ({
+        hostname: "test",
+        cpuPercent: 11,
+        memory: { percent: 22 },
+        disk: { percent: 33 },
+        load: { load1: 0.5 },
+      })),
+    }));
+    jest.doMock("../src/docker/containers", () => ({
+      listContainers: jest.fn(async () => [
+        { id: "a", name: "a", state: "running" },
+        { id: "b", name: "b", state: "exited" },
+      ]),
+    }));
+
+    ({ db, dir } = freshDb());
+    metricsHistoryMod = require("../src/system/history");
+    metricsHistoryMod.init(db);
+
+    indexMod = require("../src/index");
+    indexMod._resetSamplerState();
+    indexMod._setRecorder(metricsHistoryMod.recordMetrics);
+  });
+
+  afterEach(() => {
+    db.close();
+    fs.rmSync(dir, { recursive: true, force: true });
+    jest.dontMock("../src/stream/sse");
+    jest.dontMock("../src/system/metrics");
+    jest.dontMock("../src/docker/containers");
+    jest.resetModules();
+  });
+
+  test("recordMetrics persists a row with zero SSE clients", async () => {
+    const before = db.prepare("SELECT COUNT(*) AS n FROM metrics_history").get().n;
+    await indexMod.sampleTick();
+    const after = db.prepare("SELECT COUNT(*) AS n FROM metrics_history").get().n;
+    expect(after).toBe(before + 1);
+
+    const row = db
+      .prepare("SELECT cpu_percent, memory_percent, disk_percent, container_total, container_running FROM metrics_history ORDER BY id DESC")
+      .get();
+    expect(row.cpu_percent).toBe(11);
+    expect(row.container_total).toBe(2);
+    expect(row.container_running).toBe(1);
+  });
+
+  test("getLatest returns the cached sample after sampleTick", async () => {
+    await indexMod.sampleTick();
+    const latest = indexMod.getLatest();
+    expect(latest).not.toBeNull();
+    expect(latest.metrics.cpuPercent).toBe(11);
+    expect(latest.containerStats.total).toBe(2);
+  });
+
+  test("second immediate sampleTick is throttled (idle minGap 60000) — no extra row", async () => {
+    await indexMod.sampleTick();
+    const n1 = db.prepare("SELECT COUNT(*) AS n FROM metrics_history").get().n;
+    await indexMod.sampleTick(); // same tick window, idle → blocked by shouldSample
+    const n2 = db.prepare("SELECT COUNT(*) AS n FROM metrics_history").get().n;
+    expect(n2).toBe(n1);
+  });
+});
