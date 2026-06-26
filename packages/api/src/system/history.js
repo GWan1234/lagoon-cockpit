@@ -279,12 +279,12 @@ function getTrendBuckets({ tier, fromEpoch, toEpoch }) {
  */
 function runBackfill(database) {
   if (!database) return { done: false, rolled: false };
-  if (getState("backfill_v1_done") === "1") return { done: true, rolled: false };
+  if (getState("backfill_v1_done", database) === "1") return { done: true, rolled: false };
 
   const nowCreatedAt = epochToCreatedAt(Math.floor(Date.now() / 1000) + 3600); // inclusive of newest raw
   const run = database.transaction(() => {
     // raw -> hourly over the full window
-    database.prepare(HOURLY_UPSERT_SQL).run("0000-00-00 00:00:00", nowCreatedAt);
+    database.prepare(HOURLY_UPSERT_SQL).run("1970-01-01 00:00:00", nowCreatedAt);
     // hourly -> daily over the full epoch range
     database.prepare(DAILY_UPSERT_SQL).run(0, Math.floor(Date.now() / 1000) + 86400);
 
