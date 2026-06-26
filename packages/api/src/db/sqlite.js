@@ -61,6 +61,51 @@ const migrations = [
       CREATE INDEX IF NOT EXISTS idx_refresh_expires ON refresh_tokens(expires_at);
     `,
   },
+  {
+    version: 3,
+    description:
+      "Trend rollups — metrics_rollup_hourly/daily, app_state, idempotent metrics_history",
+    sql: `
+      CREATE TABLE IF NOT EXISTS metrics_history (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        cpu_percent REAL,
+        memory_percent REAL,
+        disk_percent REAL,
+        load_1 REAL,
+        container_total INTEGER,
+        container_running INTEGER,
+        created_at DATETIME DEFAULT (datetime('now'))
+      );
+      CREATE INDEX IF NOT EXISTS idx_metrics_created ON metrics_history(created_at);
+
+      CREATE TABLE IF NOT EXISTS metrics_rollup_hourly (
+        bucket_start INTEGER PRIMARY KEY,
+        cpu_min REAL, cpu_max REAL, cpu_avg REAL,
+        memory_min REAL, memory_max REAL, memory_avg REAL,
+        disk_min REAL, disk_max REAL, disk_avg REAL,
+        load_min REAL, load_max REAL, load_avg REAL,
+        container_total_min INTEGER, container_total_max INTEGER, container_total_avg REAL,
+        container_running_min INTEGER, container_running_max INTEGER, container_running_avg REAL,
+        sample_count INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS metrics_rollup_daily (
+        bucket_start INTEGER PRIMARY KEY,
+        cpu_min REAL, cpu_max REAL, cpu_avg REAL,
+        memory_min REAL, memory_max REAL, memory_avg REAL,
+        disk_min REAL, disk_max REAL, disk_avg REAL,
+        load_min REAL, load_max REAL, load_avg REAL,
+        container_total_min INTEGER, container_total_max INTEGER, container_total_avg REAL,
+        container_running_min INTEGER, container_running_max INTEGER, container_running_avg REAL,
+        sample_count INTEGER NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS app_state (
+        key TEXT PRIMARY KEY,
+        value TEXT NOT NULL
+      );
+    `,
+  },
 ];
 
 /** Initialize SQLite database */
@@ -140,4 +185,4 @@ function pruneAuditLog(retentionDays) {
   return result.changes;
 }
 
-module.exports = { init, getDb, auditLog, pruneAuditLog };
+module.exports = { init, getDb, auditLog, pruneAuditLog, runMigrations };
