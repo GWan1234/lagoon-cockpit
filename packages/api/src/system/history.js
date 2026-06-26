@@ -79,7 +79,7 @@ function getHistory(hours = 24) {
     .all(hours);
 }
 
-/** Get a summary with min/max/avg for each metric */
+/** Get a summary with min/max/avg for each metric (widened additively — all legacy keys preserved) */
 function getHistorySummary(hours = 24) {
   if (!db) return null;
   return db
@@ -92,10 +92,19 @@ function getHistorySummary(hours = 24) {
       ROUND(MIN(cpu_percent), 2) as cpu_min,
       ROUND(AVG(memory_percent), 2) as memory_avg,
       ROUND(MAX(memory_percent), 2) as memory_max,
+      ROUND(MIN(memory_percent), 2) as memory_min,
       ROUND(AVG(disk_percent), 2) as disk_avg,
       ROUND(MAX(disk_percent), 2) as disk_max,
+      ROUND(MIN(disk_percent), 2) as disk_min,
       ROUND(AVG(load_1), 2) as load_avg,
-      ROUND(MAX(load_1), 2) as load_max
+      ROUND(MAX(load_1), 2) as load_max,
+      ROUND(MIN(load_1), 2) as load_min,
+      ROUND(AVG(container_total), 2) as container_total_avg,
+      MAX(container_total) as container_total_max,
+      MIN(container_total) as container_total_min,
+      ROUND(AVG(container_running), 2) as container_running_avg,
+      MAX(container_running) as container_running_max,
+      MIN(container_running) as container_running_min
     FROM metrics_history
     WHERE created_at > datetime('now', '-' || ? || ' hours')
   `,

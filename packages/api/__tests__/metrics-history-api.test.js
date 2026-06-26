@@ -568,3 +568,28 @@ describe("GET /api/metrics/history: range-path summary reflects served window", 
     }
   });
 });
+
+describe("getHistorySummary widening (additive, backward-safe)", () => {
+  test("all legacy keys remain present (no regression)", () => {
+    const s = metricsHistory.getHistorySummary(24);
+    const LEGACY_KEYS = [
+      "data_points",
+      "cpu_avg", "cpu_max", "cpu_min",
+      "memory_avg", "memory_max",
+      "disk_avg", "disk_max",
+      "load_avg", "load_max",
+    ];
+    expect(Object.keys(s).sort()).toEqual(expect.arrayContaining(LEGACY_KEYS));
+  });
+
+  test("additive keys are present (memory_min/disk_min/load_min + container aggregates)", () => {
+    const s = metricsHistory.getHistorySummary(24);
+    for (const k of [
+      "memory_min", "disk_min", "load_min",
+      "container_total_avg", "container_total_max", "container_total_min",
+      "container_running_avg", "container_running_max", "container_running_min",
+    ]) {
+      expect(s).toHaveProperty(k);
+    }
+  });
+});
