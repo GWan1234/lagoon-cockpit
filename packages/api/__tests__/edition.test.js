@@ -1,4 +1,4 @@
-const { hasFeature, availableFeatures, defaultLimits, CE_LIMITS, PRO_LIMITS } = require("../src/edition/features");
+const { hasFeature, availableFeatures, defaultLimits, resolveRetentionDays, CE_LIMITS, PRO_LIMITS } = require("../src/edition/features");
 
 describe("Edition Features", () => {
   test("CE has basic container features", () => {
@@ -86,5 +86,40 @@ describe("Edition Features", () => {
     expect(ceFeatures.length).toBeGreaterThan(0);
     expect(proFeatures.length).toBeGreaterThan(ceFeatures.length);
     expect(entFeatures.length).toBeGreaterThan(proFeatures.length);
+  });
+});
+
+describe("resolveRetentionDays", () => {
+  test("enterprise resolves to 730 regardless of limits", () => {
+    expect(resolveRetentionDays({ name: "enterprise", limits: {} })).toBe(730);
+  });
+
+  test("private resolves to 730 regardless of limits", () => {
+    expect(resolveRetentionDays({ name: "private", limits: {} })).toBe(730);
+  });
+
+  test("ce without metricsRetentionDays claim resolves to 30", () => {
+    expect(resolveRetentionDays({ name: "ce", limits: {} })).toBe(30);
+  });
+
+  test("pro WITHOUT metricsRetentionDays claim falls back to 365, not 30", () => {
+    // pre-existing Pro JWT minted before this feature has no claim
+    expect(resolveRetentionDays({ name: "pro", limits: {} })).toBe(365);
+  });
+
+  test("explicit finite limit wins for ce and pro", () => {
+    expect(resolveRetentionDays({ name: "ce", limits: { metricsRetentionDays: 30 } })).toBe(30);
+    expect(resolveRetentionDays({ name: "pro", limits: { metricsRetentionDays: 365 } })).toBe(365);
+  });
+
+  test("unknown / missing edition fails closed to 30", () => {
+    expect(resolveRetentionDays(undefined)).toBe(30);
+    expect(resolveRetentionDays({})).toBe(30);
+    expect(resolveRetentionDays({ name: "bogus", limits: {} })).toBe(30);
+  });
+
+  test("non-finite limit value is ignored (falls back by edition name)", () => {
+    expect(resolveRetentionDays({ name: "pro", limits: { metricsRetentionDays: Infinity } })).toBe(365);
+    expect(resolveRetentionDays({ name: "ce", limits: { metricsRetentionDays: NaN } })).toBe(30);
   });
 });

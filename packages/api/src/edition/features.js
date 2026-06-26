@@ -123,6 +123,21 @@ function defaultLimits(editionName) {
   return { ...CE_LIMITS };
 }
 
+/**
+ * Resolve the metrics-history retention window (in days) for an edition.
+ * Fails closed BY EDITION NAME: a Pro license minted before metricsRetentionDays
+ * existed (no claim) must fall back to 365, not collapse to the CE default of 30.
+ * @param {{ name?: string, limits?: { metricsRetentionDays?: number } }} edition
+ * @returns {number}
+ */
+function resolveRetentionDays(edition) {
+  const name = edition?.name;
+  if (name === "enterprise" || name === "private") return 730;
+  const limit = edition?.limits?.metricsRetentionDays;
+  if (Number.isFinite(limit)) return limit;
+  return name === "pro" ? PRO_LIMITS.metricsRetentionDays : CE_LIMITS.metricsRetentionDays;
+}
+
 module.exports = {
   FEATURE_EDITIONS,
   EDITION_RANK,
@@ -132,4 +147,5 @@ module.exports = {
   requiredEdition,
   availableFeatures,
   defaultLimits,
+  resolveRetentionDays,
 };
