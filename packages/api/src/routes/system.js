@@ -5,7 +5,7 @@ const { getSystemMetrics } = require("../system/metrics");
 const { checkAllSSL } = require("../system/ssl");
 const { probeAllEndpoints } = require("../system/endpoints");
 const metricsHistory = require("../system/history");
-const { parseRequest, clampDays, selectTier } = require("./history-query");
+const { parseRequest, clampDays, selectTier, MAX_POINTS } = require("./history-query");
 const containers = require("../docker/containers");
 const dockerSystem = require("../docker/system");
 const { systemPrune } = require("../docker/prune");
@@ -181,12 +181,41 @@ router.get("/api/metrics/history", requireAuth, (req, res) => {
     fromEpoch = nowSec - Math.round(servedDays * 86400);
   }
 
-  const buckets = metricsHistory.getTrendBuckets({ tier, fromEpoch, toEpoch });
-  const summaryHours = Math.max(1, Math.round(servedDays * 24));
+  // Cap returned buckets to MAX_POINTS (keep oldest first, drop tail if needed).
+  const rawBuckets = metricsHistory.getTrendBuckets({ tier, fromEpoch, toEpoch });
+  const buckets = rawBuckets.slice(0, MAX_POINTS);
+
+  // Summary is derived from the returned buckets so it always reflects the served
+  // window (not the 48h raw table which only holds the last two days of data).
+  const totalSamples = buckets.reduce((s, b) => s + (b.sample_count || 1), 0);
+  const bucketSummary = buckets.length === 0 ? null : {
+    data_points: buckets.length,
+    cpu_min: Math.min(...buckets.map((b) => b.cpu_min ?? b.cpu_avg)),
+    cpu_max: Math.max(...buckets.map((b) => b.cpu_max ?? b.cpu_avg)),
+    cpu_avg: totalSamples > 0
+      ? Math.round(buckets.reduce((s, b) => s + (b.cpu_avg ?? 0) * (b.sample_count || 1), 0) / totalSamples * 100) / 100
+      : null,
+    memory_min: Math.min(...buckets.map((b) => b.memory_min ?? b.memory_avg)),
+    memory_max: Math.max(...buckets.map((b) => b.memory_max ?? b.memory_avg)),
+    memory_avg: totalSamples > 0
+      ? Math.round(buckets.reduce((s, b) => s + (b.memory_avg ?? 0) * (b.sample_count || 1), 0) / totalSamples * 100) / 100
+      : null,
+    disk_min: Math.min(...buckets.map((b) => b.disk_min ?? b.disk_avg)),
+    disk_max: Math.max(...buckets.map((b) => b.disk_max ?? b.disk_avg)),
+    disk_avg: totalSamples > 0
+      ? Math.round(buckets.reduce((s, b) => s + (b.disk_avg ?? 0) * (b.sample_count || 1), 0) / totalSamples * 100) / 100
+      : null,
+    load_min: Math.min(...buckets.map((b) => b.load_min ?? b.load_avg)),
+    load_max: Math.max(...buckets.map((b) => b.load_max ?? b.load_avg)),
+    load_avg: totalSamples > 0
+      ? Math.round(buckets.reduce((s, b) => s + (b.load_avg ?? 0) * (b.sample_count || 1), 0) / totalSamples * 100) / 100
+      : null,
+  };
+
   return res.json({
     resolution: tier,
     buckets,
-    summary: metricsHistory.getHistorySummary(summaryHours),
+    summary: bucketSummary,
     clamped,
     requestedDays: parsed.requestedDays,
     servedDays,

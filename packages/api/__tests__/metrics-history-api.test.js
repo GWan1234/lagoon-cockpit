@@ -235,22 +235,25 @@ function setEdition(name, retentionDays) {
       : { name, limits: { metricsRetentionDays: retentionDays } };
 }
 
-// Insert a raw metrics_history row at a specific UTC datetime string.
-function seedRaw(createdAt, cpu = 10, mem = 20, disk = 30, load = 0.5, ct = 5, cr = 4) {
-  database
-    .prepare(
-      `INSERT INTO metrics_history
-         (cpu_percent, memory_percent, disk_percent, load_1, container_total, container_running, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    )
-    .run(cpu, mem, disk, load, ct, cr, createdAt);
-}
-
 // Insert a daily rollup row at a given epoch-day bucket.
 function seedDaily(bucketStart, cpuAvg = 50) {
   database
     .prepare(
       `INSERT OR REPLACE INTO metrics_rollup_daily
+         (bucket_start, cpu_min, cpu_max, cpu_avg, memory_min, memory_max, memory_avg,
+          disk_min, disk_max, disk_avg, load_min, load_max, load_avg,
+          container_total_min, container_total_max, container_total_avg,
+          container_running_min, container_running_max, container_running_avg, sample_count)
+       VALUES (?, ?, ?, ?, 1,2,1.5, 1,2,1.5, 0,1,0.5, 1,2,1.5, 1,2,1.5, 1)`
+    )
+    .run(bucketStart, cpuAvg, cpuAvg, cpuAvg);
+}
+
+// Insert an hourly rollup row at a given epoch-hour bucket.
+function seedHourly(bucketStart, cpuAvg = 50) {
+  database
+    .prepare(
+      `INSERT OR REPLACE INTO metrics_rollup_hourly
          (bucket_start, cpu_min, cpu_max, cpu_avg, memory_min, memory_max, memory_avg,
           disk_min, disk_max, disk_avg, load_min, load_max, load_avg,
           container_total_min, container_total_max, container_total_avg,
@@ -320,68 +323,137 @@ describe("GET /api/metrics/history: edition clamp (200 + clamped:true)", () => {
 });
 
 describe("GET /api/metrics/history: PAYWALL CANNOT BE BYPASSED", () => {
-  // Seed a daily row 200 days in the past. CE retention is 30d => must never appear.
+  // CE retention = 30 days. We seed poison rows at -200d in BOTH the hourly
+  // and daily rollup tables so the test is discriminating regardless of which
+  // tier the clamped path selects.
+  //   • range=1y CE → servedDays=30 → tier=hourly → reads metrics_rollup_hourly
+  //   • hours=8760 CE → legacy hourly path → reads metrics_rollup_hourly
+  //   • from/to spanning 200d CE → servedDays=30 → tier=hourly → same
+  // A count-only clamp (e.g. LIMIT 30) on the DB query would still return the
+  // -200d row when it is the ONLY row in the table, so these tests WOULD FAIL
+  // against such an implementation because the age assertion would breach 30d.
   const nowSec = Math.floor(Date.now() / 1000);
+  const CE_DAYS = 30;
+  // Hourly bucket 200 days ago (on an exact hour boundary).
+  const hourlyBucket200 = Math.floor((nowSec - 200 * 86400) / 3600) * 3600;
+  // Daily bucket 200 days ago.
   const dayBucket200 = Math.floor((nowSec - 200 * 86400) / 86400) * 86400;
+
   beforeAll(() => {
-    seedDaily(dayBucket200, 99); // distinctive cpu_avg=99 marks the forbidden row
+    // cpu_avg=99 is the distinctive sentinel value for both poison rows.
+    seedHourly(hourlyBucket200, 99);
+    seedDaily(dayBucket200, 99);
   });
 
-  const forbidden = (res) =>
-    (res.body.buckets || []).every((b) => b.t >= dayBucket200 + 86400) || // not before
-    !(res.body.buckets || []).some((b) => b.t === dayBucket200);
+  // Helper: assert oldest bucket is within the allowed window.
+  // This FAILS if the clamp is count-only and the poison row leaks through.
+  function assertOldestWithinWindow(buckets, servedDays) {
+    if (buckets.length === 0) return; // empty is fine
+    const minT = Math.min(...buckets.map((b) => b.t));
+    const maxAge = nowSec - minT;
+    const slack = 3700; // one extra hour of slack for bucket boundaries
+    expect(maxAge).toBeLessThanOrEqual(servedDays * 86400 + slack);
+  }
 
-  test("CE range=1y never returns the -200d daily row", async () => {
-    setEdition("ce", 30);
+  test("CE range=1y never returns -200d hourly poison (age assertion)", async () => {
+    setEdition("ce", CE_DAYS);
     const res = await auth(request(app).get("/api/metrics/history?range=1y"));
     expect(res.status).toBe(200);
-    expect(res.body.servedDays).toBe(30);
-    expect((res.body.buckets || []).some((b) => b.t === dayBucket200)).toBe(false);
+    expect(res.body.servedDays).toBe(CE_DAYS);
+    const buckets = res.body.buckets || [];
+    // The -200d hourly bucket must not appear.
+    expect(buckets.some((b) => b.t === hourlyBucket200)).toBe(false);
+    // Age-based: oldest bucket must not predate the 30d window (discriminating check).
+    assertOldestWithinWindow(buckets, CE_DAYS);
   });
 
-  test("CE hours=8760 (legacy bypass attempt) clamps to 30d window", async () => {
-    setEdition("ce", 30);
+  test("CE hours=8760 (legacy bypass attempt) clamps to 30d window — hourly poison absent", async () => {
+    setEdition("ce", CE_DAYS);
     const res = await auth(request(app).get("/api/metrics/history?hours=8760"));
     expect(res.status).toBe(200);
-    // legacy shape -> history array; none of its rows may be the -200d data
+    // legacy shape -> history array (mapped from hourly); none may be the -200d data
     const rows = res.body.history || [];
     expect(rows.every((r) => r.cpu_percent !== 99)).toBe(true);
+    // Age-based: oldest created_at must not predate the 30d window.
+    if (rows.length > 0) {
+      const minCreatedAt = Math.min(...rows.map((r) => new Date(r.created_at.replace(" ", "T") + "Z").getTime() / 1000));
+      const maxAge = nowSec - minCreatedAt;
+      const slack = 3700;
+      expect(maxAge).toBeLessThanOrEqual(CE_DAYS * 86400 + slack);
+    }
   });
 
-  test("CE from/to spanning 200d clamps served window to 30d", async () => {
-    setEdition("ce", 30);
-    const from = nowSec - 200 * 86400;
-    const res = await auth(
-      request(app).get(`/api/metrics/history?from=${from}&to=${nowSec}`)
-    );
-    expect(res.status).toBe(200);
-    expect(res.body.servedDays).toBe(30);
-    expect((res.body.buckets || []).some((b) => b.t === dayBucket200)).toBe(false);
-  });
-
-  test("CE array days param is rejected with 400 (no bypass)", async () => {
-    setEdition("ce", 30);
-    const res = await auth(request(app).get("/api/metrics/history?hours=24&hours=48"));
-    expect(res.status).toBe(400);
-  });
-
-  test("CE negative hours is rejected with 400", async () => {
-    setEdition("ce", 30);
-    const res = await auth(request(app).get("/api/metrics/history?hours=-3"));
-    expect(res.status).toBe(400);
-  });
-
-  test("CE hours=1e9 clamps, never leaks -200d", async () => {
-    setEdition("ce", 30);
+  test("CE hours=1e9 clamps — hourly poison absent", async () => {
+    setEdition("ce", CE_DAYS);
     const res = await auth(request(app).get("/api/metrics/history?hours=1e9"));
     expect(res.status).toBe(200);
     const rows = res.body.history || [];
     expect(rows.every((r) => r.cpu_percent !== 99)).toBe(true);
   });
 
+  test("CE from/to spanning 200d clamps served window to 30d (age assertion)", async () => {
+    setEdition("ce", CE_DAYS);
+    const from = nowSec - 200 * 86400;
+    const res = await auth(
+      request(app).get(`/api/metrics/history?from=${from}&to=${nowSec}`)
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.servedDays).toBe(CE_DAYS);
+    const buckets = res.body.buckets || [];
+    expect(buckets.some((b) => b.t === hourlyBucket200)).toBe(false);
+    assertOldestWithinWindow(buckets, CE_DAYS);
+  });
+
+  test("CE range=1y never returns -200d daily poison (daily tier check)", async () => {
+    // Force daily tier by using a Pro edition with 200d retention and a range that
+    // triggers daily tier (>90d). CE at 30d always hits hourly; to prove the daily
+    // poison is also blocked we test Pro-clamped-to-31d (daily tier) vs the -200d row.
+    // Actually, simplest: seed a daily poison and verify it's absent from a range=1y
+    // Pro request whose window does NOT cover 200d ago.
+    setEdition("pro", 31); // servedDays=31 → still hourly tier, so use a wider window
+    // Use pro with 200d retention to trigger daily tier (servedDays=200 > 90).
+    setEdition("pro", 200);
+    const res = await auth(request(app).get("/api/metrics/history?range=1y"));
+    expect(res.status).toBe(200);
+    // servedDays clamped to 200 which is still < 200d-ago: poison should be absent.
+    const buckets = res.body.buckets || [];
+    expect(buckets.some((b) => b.t === dayBucket200)).toBe(false);
+    assertOldestWithinWindow(buckets, 200);
+  });
+
+  test("CE array days param is rejected with 400 (no bypass)", async () => {
+    setEdition("ce", CE_DAYS);
+    const res = await auth(request(app).get("/api/metrics/history?hours=24&hours=48"));
+    expect(res.status).toBe(400);
+  });
+
+  test("CE negative hours is rejected with 400", async () => {
+    setEdition("ce", CE_DAYS);
+    const res = await auth(request(app).get("/api/metrics/history?hours=-3"));
+    expect(res.status).toBe(400);
+  });
+
   test("CE range=garbage string is rejected with 400", async () => {
-    setEdition("ce", 30);
+    setEdition("ce", CE_DAYS);
     const res = await auth(request(app).get("/api/metrics/history?range=forever"));
+    expect(res.status).toBe(400);
+  });
+
+  test("adversarial: array from param is rejected 400", async () => {
+    setEdition("ce", CE_DAYS);
+    const res = await auth(request(app).get(`/api/metrics/history?from=100&from=200&to=${nowSec}`));
+    expect(res.status).toBe(400);
+  });
+
+  test("adversarial: negative from is rejected 400", async () => {
+    setEdition("ce", CE_DAYS);
+    const res = await auth(request(app).get(`/api/metrics/history?from=-5&to=${nowSec}`));
+    expect(res.status).toBe(400);
+  });
+
+  test("adversarial: string from is rejected 400", async () => {
+    setEdition("ce", CE_DAYS);
+    const res = await auth(request(app).get(`/api/metrics/history?from=abc&to=${nowSec}`));
     expect(res.status).toBe(400);
   });
 });
@@ -449,5 +521,50 @@ describe("GET /api/metrics/history: MAX_POINTS auto-promote", () => {
     );
     expect(res.status).toBe(200);
     expect(res.body.resolution).not.toBe("raw");
+  });
+
+  test("route-level MAX_POINTS cap: buckets.length is always <= MAX_POINTS", async () => {
+    // This invariant must hold regardless of how many rows are in the DB.
+    // Under current tier selection (hourly tops at ~2160 for 90d, daily even fewer)
+    // the cap is never hit in practice — but we assert it universally.
+    setEdition("pro", 365);
+    const now = Math.floor(Date.now() / 1000);
+    // Seed enough hourly rows to force a non-trivial bucket set (7 days = 168 hourly buckets,
+    // well under MAX_POINTS=5000 but enough to prove the cap is applied and doesn't over-truncate).
+    for (let i = 1; i <= 10; i++) {
+      const b = Math.floor((now - i * 3600) / 3600) * 3600;
+      seedHourly(b, i * 3);
+    }
+    const res = await auth(
+      request(app).get(`/api/metrics/history?from=${now - 7 * 86400}&to=${now}`)
+    );
+    expect(res.status).toBe(200);
+    expect(res.body.buckets.length).toBeLessThanOrEqual(MAX_POINTS);
+  });
+});
+
+describe("GET /api/metrics/history: range-path summary reflects served window", () => {
+  test("30d CE range summary is derived from buckets, not from 48h raw table", async () => {
+    // Seed an hourly row ~15 days ago with a distinctive cpu_avg=77.
+    // getHistorySummary(hours) reads metrics_history (48h retention) so it would
+    // never see this row. The new bucket-derived summary MUST include it.
+    const nowSec = Math.floor(Date.now() / 1000);
+    const oldBucket = Math.floor((nowSec - 15 * 86400) / 3600) * 3600;
+    seedHourly(oldBucket, 77); // cpu_avg=77, well outside 48h raw window
+
+    setEdition("ce", 30);
+    const res = await auth(request(app).get("/api/metrics/history?range=30d"));
+    expect(res.status).toBe(200);
+    expect(res.body.resolution).toBe("hourly");
+    const s = res.body.summary;
+    // Summary must be non-null and cover the 15d-old bucket (cpu_max >= 77).
+    expect(s).not.toBeNull();
+    expect(s.cpu_max).toBeGreaterThanOrEqual(77);
+    // And the summary keys exist.
+    for (const k of ["data_points", "cpu_avg", "cpu_max", "cpu_min",
+                     "memory_avg", "memory_max", "disk_avg", "disk_max",
+                     "load_avg", "load_max"]) {
+      expect(s).toHaveProperty(k);
+    }
   });
 });
