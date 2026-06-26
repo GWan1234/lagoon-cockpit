@@ -154,6 +154,51 @@ describe("rollupTick raw -> hourly", () => {
   });
 });
 
+describe("rollupTick hourly -> daily (sample-weighted avg)", () => {
+  test("daily avg is sample-weighted; daily min/max/sample_count fold the hourly rows", () => {
+    // Two completed hours on 2026-06-01, weights 1 and 9 → weighted cpu avg = (10*1 + 20*9)/10 = 19.
+    insertRaw(db, "2026-06-01 08:05:00", { cpu: 10, mem: 30, disk: 40, load: 0.1, ctotal: 4, crunning: 4 });
+    let i;
+    for (i = 0; i < 9; i++) {
+      insertRaw(db, "2026-06-01 09:0" + i + ":00", { cpu: 20, mem: 50, disk: 45, load: 0.5, ctotal: 6, crunning: 5 });
+    }
+    metricsHistory.rollupTick(db);
+
+    const dayBucket = Math.floor(Date.parse("2026-06-01T00:00:00Z") / 1000);
+    const row = db.prepare("SELECT * FROM metrics_rollup_daily WHERE bucket_start = ?").get(dayBucket);
+    expect(row).toBeTruthy();
+    expect(row.bucket_start).toBe(dayBucket);
+    expect(row.sample_count).toBe(10); // SUM(1, 9)
+    expect(row.cpu_min).toBe(10);
+    expect(row.cpu_max).toBe(20);
+    expect(row.cpu_avg).toBe(19); // weighted, NOT the simple mean 15
+    expect(row.memory_min).toBe(30);
+    expect(row.memory_max).toBe(50);
+    expect(row.container_total_max).toBe(6);
+  });
+
+  test("daily rollup is idempotent (twice == identical)", () => {
+    insertRaw(db, "2026-06-02 08:05:00", { cpu: 11, mem: 33, disk: 44, load: 0.2, ctotal: 3, crunning: 3 });
+    insertRaw(db, "2026-06-02 09:05:00", { cpu: 22, mem: 44, disk: 44, load: 0.4, ctotal: 3, crunning: 3 });
+    metricsHistory.rollupTick(db);
+    const first = db.prepare("SELECT * FROM metrics_rollup_daily ORDER BY bucket_start").all();
+    metricsHistory.rollupTick(db);
+    const second = db.prepare("SELECT * FROM metrics_rollup_daily ORDER BY bucket_start").all();
+    expect(second).toEqual(first);
+  });
+
+  test("today's incomplete day is not finalized", () => {
+    const now = new Date();
+    const isoToday = now.toISOString().slice(0, 10) + " 00:30:00";
+    insertRaw(db, isoToday, { cpu: 50, mem: 50, disk: 50, load: 1, ctotal: 1, crunning: 1 });
+    metricsHistory.rollupTick(db);
+    const todayBucket = Math.floor(Date.now() / 1000 / 86400) * 86400;
+    const row = db.prepare("SELECT * FROM metrics_rollup_daily WHERE bucket_start = ?").get(todayBucket);
+    // The current hour is excluded from hourly, and today's day is excluded from daily.
+    expect(row).toBeUndefined();
+  });
+});
+
 describe("app_state helpers", () => {
   test("getState returns null for an absent key", () => {
     expect(metricsHistory.getState("nope")).toBeNull();

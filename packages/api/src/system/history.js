@@ -145,6 +145,40 @@ const HOURLY_UPSERT_SQL = `
     sample_count=excluded.sample_count;
 `;
 
+// hourly -> daily: sample-weighted avg, min=MIN, max=MAX, sample_count=SUM.
+// Operates on metrics_rollup_hourly; the day bucket = floor(bucket_start/86400)*86400.
+const DAILY_UPSERT_SQL = `
+  INSERT INTO metrics_rollup_daily
+    (bucket_start, cpu_min, cpu_max, cpu_avg, memory_min, memory_max, memory_avg,
+     disk_min, disk_max, disk_avg, load_min, load_max, load_avg,
+     container_total_min, container_total_max, container_total_avg,
+     container_running_min, container_running_max, container_running_avg, sample_count)
+  SELECT h.bucket_start / 86400 * 86400 AS day_bucket,
+         MIN(h.cpu_min), MAX(h.cpu_max), ROUND(SUM(h.cpu_avg * h.sample_count) / SUM(h.sample_count), 2),
+         MIN(h.memory_min), MAX(h.memory_max), ROUND(SUM(h.memory_avg * h.sample_count) / SUM(h.sample_count), 2),
+         MIN(h.disk_min), MAX(h.disk_max), ROUND(SUM(h.disk_avg * h.sample_count) / SUM(h.sample_count), 2),
+         MIN(h.load_min), MAX(h.load_max), ROUND(SUM(h.load_avg * h.sample_count) / SUM(h.sample_count), 2),
+         MIN(h.container_total_min), MAX(h.container_total_max),
+         ROUND(SUM(h.container_total_avg * h.sample_count) / SUM(h.sample_count), 2),
+         MIN(h.container_running_min), MAX(h.container_running_max),
+         ROUND(SUM(h.container_running_avg * h.sample_count) / SUM(h.sample_count), 2),
+         SUM(h.sample_count)
+  FROM metrics_rollup_hourly h
+  WHERE h.bucket_start >= ? AND h.bucket_start < ?
+  GROUP BY day_bucket
+  HAVING SUM(h.sample_count) > 0
+  ON CONFLICT(bucket_start) DO UPDATE SET
+    cpu_min=excluded.cpu_min, cpu_max=excluded.cpu_max, cpu_avg=excluded.cpu_avg,
+    memory_min=excluded.memory_min, memory_max=excluded.memory_max, memory_avg=excluded.memory_avg,
+    disk_min=excluded.disk_min, disk_max=excluded.disk_max, disk_avg=excluded.disk_avg,
+    load_min=excluded.load_min, load_max=excluded.load_max, load_avg=excluded.load_avg,
+    container_total_min=excluded.container_total_min, container_total_max=excluded.container_total_max,
+    container_total_avg=excluded.container_total_avg,
+    container_running_min=excluded.container_running_min, container_running_max=excluded.container_running_max,
+    container_running_avg=excluded.container_running_avg,
+    sample_count=excluded.sample_count;
+`;
+
 /** Format a UTC epoch-seconds value as a UTC-naive 'YYYY-MM-DD HH:MM:SS' string for created_at comparisons. */
 function epochToCreatedAt(epochSec) {
   return new Date(epochSec * 1000).toISOString().slice(0, 19).replace("T", " ");
@@ -164,6 +198,12 @@ function rollupTick(database) {
   const wm = wmRaw !== null ? parseInt(wmRaw, 10) : 0;
   const hourlyLow = wm > 0 ? wm - 3600 : 0; // slack: re-roll the boundary bucket
 
+  // hourly -> daily: only completed days (day_bucket < floor(now/86400)*86400).
+  const lastCompleteDay = Math.floor(nowSec / 86400) * 86400; // exclusive upper bound for daily fold
+  const dwRaw = getState("rollup_daily_watermark", database);
+  const dw = dwRaw !== null ? parseInt(dwRaw, 10) : 0;
+  const dailyLow = dw > 0 ? dw - 86400 : 0; // slack: recompute boundary day
+
   const run = database.transaction(() => {
     database
       .prepare(HOURLY_UPSERT_SQL)
@@ -173,6 +213,14 @@ function rollupTick(database) {
       .prepare("SELECT MAX(bucket_start) AS m FROM metrics_rollup_hourly WHERE bucket_start < ?")
       .get(lastCompleteHour);
     if (maxHourly && maxHourly.m !== null) setState("rollup_hourly_watermark", String(maxHourly.m), database);
+
+    // hourly -> daily for completed days only.
+    database.prepare(DAILY_UPSERT_SQL).run(dailyLow, lastCompleteDay);
+
+    const maxDaily = database
+      .prepare("SELECT MAX(bucket_start) AS m FROM metrics_rollup_daily WHERE bucket_start < ?")
+      .get(lastCompleteDay);
+    if (maxDaily && maxDaily.m !== null) setState("rollup_daily_watermark", String(maxDaily.m), database);
   });
   run();
 }
