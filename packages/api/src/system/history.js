@@ -30,6 +30,11 @@ function init(database) {
   ); // Every hour
 }
 
+/** Coerce a value to a finite number or null (NaN/Infinity → null so SQLite binds clean NULL) */
+function finiteOrNull(v) {
+  return typeof v === "number" && Number.isFinite(v) ? v : null;
+}
+
 /** Record a metrics snapshot */
 function recordMetrics(metrics, containerStats) {
   if (!db) return;
@@ -39,12 +44,12 @@ function recordMetrics(metrics, containerStats) {
     VALUES (?, ?, ?, ?, ?, ?)
   `,
   ).run(
-    metrics.cpuPercent,
-    metrics.memory.percent,
-    metrics.disk.percent,
-    metrics.load.load1,
-    containerStats.total,
-    containerStats.running,
+    finiteOrNull(metrics.cpuPercent),
+    finiteOrNull(metrics.memory.percent),
+    finiteOrNull(metrics.disk.percent),
+    finiteOrNull(metrics.load.load1),
+    finiteOrNull(containerStats.total),
+    finiteOrNull(containerStats.running),
   );
 }
 
