@@ -75,7 +75,8 @@ export default function TrendsScreen() {
     unit: string,
     color: string,
   ) {
-    const series = toBandSeries(data!.buckets, key);
+    if (!data?.buckets?.length) return null;
+    const series = toBandSeries(data.buckets, key);
     const current = latest ? Number(latest[`${key}_avg` as keyof typeof latest]) : undefined;
     return (
       <View style={styles.card} key={key}>
@@ -108,14 +109,15 @@ export default function TrendsScreen() {
           initialSpacing={0}
           adjustToWidth
         />
-        <Text style={styles.bandHint}>shaded band = min / max per bucket</Text>
+        <Text style={styles.bandHint}>avg line · min/max shown as bracketing lines</Text>
       </View>
     );
   }
 
   function renderContainerChart() {
-    const total = toBandSeries(data!.buckets, 'container_total').line;
-    const running = toBandSeries(data!.buckets, 'container_running').line;
+    if (!data?.buckets?.length) return null;
+    const total = toBandSeries(data.buckets, 'container_total').line;
+    const running = toBandSeries(data.buckets, 'container_running').line;
     return (
       <View style={styles.card}>
         <View style={styles.cardHeader}>
