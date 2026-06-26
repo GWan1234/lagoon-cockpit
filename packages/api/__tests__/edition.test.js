@@ -69,6 +69,16 @@ describe("Edition Features", () => {
     expect(Object.keys(entLimits)).toHaveLength(0);
   });
 
+  test("metricsRetentionDays present in both limit maps with values 30/365", () => {
+    expect(CE_LIMITS.metricsRetentionDays).toBe(30);
+    expect(PRO_LIMITS.metricsRetentionDays).toBe(365);
+  });
+
+  test("defaultLimits surfaces metricsRetentionDays for ce and pro", () => {
+    expect(defaultLimits("ce").metricsRetentionDays).toBe(30);
+    expect(defaultLimits("pro").metricsRetentionDays).toBe(365);
+  });
+
   test("availableFeatures returns correct count per edition", () => {
     const ceFeatures = availableFeatures("ce");
     const proFeatures = availableFeatures("pro");

@@ -62,6 +62,7 @@ const CE_LIMITS = {
   webhooks: 3,
   schedules: 5,
   integrations: 2,
+  metricsRetentionDays: 30,
 };
 
 // Default limits for Pro
@@ -73,6 +74,7 @@ const PRO_LIMITS = {
   schedules: 50,
   integrations: 10,
   auditRetentionDays: 30,
+  metricsRetentionDays: 365,
 };
 
 /**
