@@ -5,6 +5,10 @@
 
 let db = null;
 
+/** Post-backfill raw retention. Pre-backfill the legacy 168h window is preserved. */
+const RAW_RETENTION_HOURS = 48;
+const LEGACY_RAW_RETENTION_HOURS = 168;
+
 function init(database) {
   db = database;
   db.exec(`
@@ -21,13 +25,19 @@ function init(database) {
     CREATE INDEX IF NOT EXISTS idx_metrics_created ON metrics_history(created_at);
   `);
 
-  // Cleanup old entries (keep 7 days)
+  // Guarded raw prune (rollup-before-prune): deletes only rolled raw older than
+  // the effective retention. Runs hourly. The rollup interval itself is armed in
+  // index.js (always-on, 5-min) alongside boot catch-up + backfill.
   setInterval(
     () => {
-      if (db) db.prepare("DELETE FROM metrics_history WHERE created_at < datetime('now', '-7 days')").run();
+      try {
+        if (db) pruneRaw(db);
+      } catch (err) {
+        console.error("[COCKPIT] raw prune error:", err.message);
+      }
     },
     60 * 60 * 1000,
-  ); // Every hour
+  );
 }
 
 /** Coerce a value to a finite number or null (NaN/Infinity → null so SQLite binds clean NULL) */
@@ -93,11 +103,16 @@ function getHistorySummary(hours = 24) {
     .get(hours);
 }
 
+/** Internal: read app_state from an explicit connection (no fallback to module-level db). */
+function getStateOn(database, key) {
+  const row = database.prepare("SELECT value FROM app_state WHERE key = ?").get(key);
+  return row ? row.value : null;
+}
+
 /** Read a value from the generic app_state key/value table; null if absent. */
 function getState(key, conn = db) {
   if (!conn) return null;
-  const row = conn.prepare("SELECT value FROM app_state WHERE key = ?").get(key);
-  return row ? row.value : null;
+  return getStateOn(conn, key);
 }
 
 /** Upsert a value into the generic app_state key/value table. */
@@ -300,4 +315,29 @@ function runBackfill(database) {
   return { done: true, rolled: true };
 }
 
-module.exports = { init, recordMetrics, getHistory, getHistorySummary, getState, setState, rollupTick, getTrendBuckets, runBackfill };
+/**
+ * Guarded raw prune: delete a raw row ONLY if its hour bucket already exists in
+ * metrics_rollup_hourly (so un-rolled raw is never dropped) AND it is older than
+ * the effective retention. Effective retention is 48h once backfill_v1_done='1',
+ * else the legacy 168h. Returns the number of rows deleted.
+ */
+function pruneRaw(database) {
+  const d = database || db;
+  if (!d) return 0;
+  const hours = getStateOn(d, "backfill_v1_done") === "1" ? RAW_RETENTION_HOURS : LEGACY_RAW_RETENTION_HOURS;
+  const result = d
+    .prepare(
+      `DELETE FROM metrics_history
+       WHERE created_at < datetime('now', '-' || ? || ' hours')
+         AND CAST(strftime('%s', created_at) AS INTEGER) / 3600 * 3600
+             IN (SELECT bucket_start FROM metrics_rollup_hourly)`,
+    )
+    .run(hours);
+  return result.changes;
+}
+
+module.exports = {
+  init, recordMetrics, getHistory, getHistorySummary,
+  getState, setState, rollupTick, getTrendBuckets, runBackfill,
+  pruneRaw, RAW_RETENTION_HOURS,
+};

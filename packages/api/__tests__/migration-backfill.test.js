@@ -109,3 +109,47 @@ describe("runBackfill", () => {
     expect(hourlyAfterSecond).toBe(hourlyAfterFirst);
   });
 });
+
+describe("guarded raw prune", () => {
+  test("RAW_RETENTION_HOURS is 48", () => {
+    expect(metricsHistory.RAW_RETENTION_HOURS).toBe(48);
+  });
+
+  test("never deletes un-rolled raw, even when older than retention", () => {
+    // Old raw (5 days) but NOT rolled into hourly → must survive prune.
+    insertRaw(db, daysAgo(5), { cpu: 10, mem: 40, disk: 50, load: 0.1, ctotal: 4, crunning: 4 });
+    metricsHistory.setState("backfill_v1_done", "1"); // 48h retention active
+    const deleted = metricsHistory.pruneRaw(db);
+    expect(deleted).toBe(0);
+    const remaining = db.prepare("SELECT COUNT(*) AS n FROM metrics_history").get().n;
+    expect(remaining).toBe(1);
+  });
+
+  test("deletes old raw once its hour bucket is in metrics_rollup_hourly", () => {
+    insertRaw(db, daysAgo(5), { cpu: 10, mem: 40, disk: 50, load: 0.1, ctotal: 4, crunning: 4 });
+    metricsHistory.runBackfill(db); // rolls it into hourly + sets backfill flag
+    const deleted = metricsHistory.pruneRaw(db);
+    expect(deleted).toBe(1);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM metrics_history").get().n).toBe(0);
+  });
+
+  test("keeps raw within the retention window even if rolled", () => {
+    // Recent raw (1h ago) rolled, but inside 48h → must NOT be pruned (sparkline still uses it).
+    const oneHourAgo = new Date(Date.now() - 3600 * 1000).toISOString().slice(0, 13).replace("T", " ") + ":05:00";
+    insertRaw(db, oneHourAgo, { cpu: 22, mem: 50, disk: 50, load: 0.3, ctotal: 5, crunning: 5 });
+    metricsHistory.runBackfill(db);
+    const deleted = metricsHistory.pruneRaw(db);
+    expect(deleted).toBe(0);
+    expect(db.prepare("SELECT COUNT(*) AS n FROM metrics_history").get().n).toBe(1);
+  });
+
+  test("before backfill, retention is 168h (legacy window preserved)", () => {
+    // 5-day-old raw, rolled into hourly, but backfill flag NOT set → 168h window keeps it.
+    insertRaw(db, daysAgo(5), { cpu: 10, mem: 40, disk: 50, load: 0.1, ctotal: 4, crunning: 4 });
+    metricsHistory.rollupTick(db); // rolls into hourly, does NOT set backfill_v1_done
+    expect(metricsHistory.getState("backfill_v1_done")).toBeNull();
+    const deleted = metricsHistory.pruneRaw(db);
+    expect(deleted).toBe(0); // 5d < 168h(=7d) → retained
+    expect(db.prepare("SELECT COUNT(*) AS n FROM metrics_history").get().n).toBe(1);
+  });
+});
