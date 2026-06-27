@@ -233,7 +233,7 @@ See [.env.example](packages/api/.env.example) for all options.
 ./scripts/deploy.sh --rollback
 ```
 
-The deploy script saves the current image before upgrading, waits for the deep health check (`/health` verifies API + DB + Docker), and auto-rolls back if the new container fails.
+The deploy script saves the current image before upgrading, waits for the deep health check (`/health` checks API + DB + Docker), and auto-rolls back if the new container fails.
 
 ---
 
